@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
-	"math/rand"
+	"net/http"
 	"time"
 
 	"fyne.io/fyne/v2"
@@ -43,67 +45,75 @@ func (t *LargerTheme) Size(name fyne.ThemeSizeName) float32 {
 
 // TorrentResult represents a single search result
 type TorrentResult struct {
-	Name          string
-	Size          string
-	Seeders       int
-	Leechers      int
-	DateAdded     string
-	MagnetLink    string
-	IsDownloading bool
-	IsDownloaded  bool
+	Name          string `json:"name"`
+	Size          string `json:"size"`
+	Seeders       int    `json:"seeders"`
+	Leechers      int    `json:"leechers"`
+	DateAdded     string `json:"dateAdded"`
+	MagnetLink    string `json:"magnetLink"`
+	IsDownloading bool   `json:"-"` // Not part of API response
+	IsDownloaded  bool   `json:"-"` // Not part of API response
 }
 
-// MockData generates fake torrent results based on search query
-func generateMockResults(query string) []TorrentResult {
-	if query == "" {
-		return []TorrentResult{}
+// SearchResults is the structure for the API response
+type SearchResults struct {
+	Results []TorrentResult `json:"results"`
+	Total   int             `json:"total"`
+	Query   string          `json:"query"`
+}
+
+type SearchRequest struct {
+	Query      string   `json:"query"`
+	Categories []string `json:"categories"`
+	Trackers   []string `json:"trackers"`
+}
+
+const apiURL = "http://localhost:7000/search"
+
+func fetchSearchResults(query string) ([]TorrentResult, error) {
+	req := SearchRequest{Query: query}
+	client := &http.Client{
+		Timeout: 10 * time.Second,
+	}
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, err
+	}
+	buff := bytes.NewBuffer(body)
+	// Make the request
+	resp, err := client.Post(apiURL, "application/json", buff)
+	if err != nil {
+		return nil, fmt.Errorf("API request failed: %w", err)
 	}
 
-	// Seed random generator
-	rand.Seed(time.Now().UnixNano())
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
-	// Random number of results (3-10)
-	numResults := rand.Intn(8) + 3
-
-	categories := []string{"Movies", "TV Shows", "Games", "Software", "Music", "Books"}
-	qualities := []string{"HD", "4K", "720p", "1080p", "FLAC", "MP3", "PDF"}
-
-	results := make([]TorrentResult, numResults)
-
-	for i := 0; i < numResults; i++ {
-		category := categories[rand.Intn(len(categories))]
-		quality := qualities[rand.Intn(len(qualities))]
-
-		// Size between 100MB and 20GB
-		sizeInMB := rand.Intn(20000) + 100
-		sizeStr := ""
-		if sizeInMB >= 1000 {
-			sizeStr = fmt.Sprintf("%.1f GB", float64(sizeInMB)/1000)
-		} else {
-			sizeStr = fmt.Sprintf("%d MB", sizeInMB)
-		}
-
-		// Date within last 60 days
-		daysAgo := rand.Intn(60)
-		date := time.Now().AddDate(0, 0, -daysAgo)
-		dateStr := date.Format("Jan 02, 2006")
-
-		// Generate name based on query and random elements
-		name := fmt.Sprintf("%s - %s [%s]", query, category, quality)
-
-		results[i] = TorrentResult{
-			Name:          name,
-			Size:          sizeStr,
-			Seeders:       rand.Intn(500) + 1,
-			Leechers:      rand.Intn(200),
-			DateAdded:     dateStr,
-			MagnetLink:    fmt.Sprintf("magnet:?xt=urn:btih:%x", rand.Int63()),
-			IsDownloading: false,
-			IsDownloaded:  false,
-		}
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 
-	return results
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("API returned error status: %d - %s", resp.StatusCode, string(body))
+	}
+
+	// Parse JSON response
+	var searchResults SearchResults
+	if err = json.Unmarshal(body, &searchResults); err != nil {
+		return nil, fmt.Errorf("failed to parse JSON response: %w", err)
+	}
+
+	return []TorrentResult{{
+		Name:          "test",
+		Size:          "q",
+		Seeders:       10,
+		Leechers:      10,
+		DateAdded:     "1",
+		MagnetLink:    "1",
+		IsDownloading: false,
+		IsDownloaded:  false,
+	}}, nil
 }
 
 func main() {
@@ -167,9 +177,6 @@ func main() {
 		// Update function comes later with a separate function
 		nil,
 	)
-
-	// Make list items taller for better readability
-	//resultList.SetItemHeight(1, 105)
 
 	// Define update function separately to avoid self-reference
 	updateFunc := func(id widget.ListItemID, item fyne.CanvasObject) {
@@ -253,6 +260,11 @@ func main() {
 	searchEntry.SetPlaceHolder("Enter search terms...")
 	searchEntry.TextStyle = fyne.TextStyle{Bold: true}
 
+	// Error dialog helper function
+	showError := func(title, message string) {
+		dialog.ShowError(fmt.Errorf("%s", message), myWindow)
+	}
+
 	// Search button with action - larger and more prominent
 	searchButton := widget.NewButtonWithIcon("Search", theme.SearchIcon(), func() {
 		query := searchEntry.Text
@@ -264,21 +276,26 @@ func main() {
 		// Update status
 		statusLabel.SetText("Searching for: " + query)
 
-		// Simulate search delay
+		// Perform the API search in a goroutine
 		go func() {
-			time.Sleep(1 * time.Second)
+			// Call the API
+			results, err := fetchSearchResults(query)
 
-			// Generate results in the goroutine
-			mockResults := generateMockResults(query)
-
-			// Update UI on the main thread using the correct Fyne API
+			// Update UI on the main thread
 			myApp.Driver().DoFromGoroutine(func() {
-				currentResults = mockResults
+				if err != nil {
+					statusLabel.SetText("Search failed")
+					showError("Search Error", fmt.Sprintf("Failed to search: %v", err))
+					return
+				}
+
+				// Update the results
+				currentResults = results
 				resultList.Refresh()
 
-				// Update status
-				if len(currentResults) > 0 {
-					statusLabel.SetText(fmt.Sprintf("Found %d results for '%s'", len(currentResults), query))
+				// Update status based on results
+				if len(results) > 0 {
+					statusLabel.SetText(fmt.Sprintf("Found %d results for '%s'", len(results), query))
 				} else {
 					statusLabel.SetText(fmt.Sprintf("No results found for '%s'", query))
 				}
