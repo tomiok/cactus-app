@@ -2,8 +2,12 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/anacrolix/log"
+	"github.com/tomiok/cactus-app/downloader"
+	"io"
 	"net/http"
 	"time"
 
@@ -43,23 +47,32 @@ func (t *LargerTheme) Size(name fyne.ThemeSizeName) float32 {
 	}
 }
 
-// TorrentResult represents a single search result
-type TorrentResult struct {
-	Name          string `json:"name"`
-	Size          string `json:"size"`
-	Seeders       int    `json:"seeders"`
-	Leechers      int    `json:"leechers"`
-	DateAdded     string `json:"dateAdded"`
-	MagnetLink    string `json:"magnetLink"`
-	IsDownloading bool   `json:"-"` // Not part of API response
-	IsDownloaded  bool   `json:"-"` // Not part of API response
+type Result struct {
+	FirstSeen    string    `json:"FirstSeen"`
+	Tracker      string    `json:"Tracker"`
+	TrackerId    string    `json:"TrackerId"`
+	TrackerType  string    `json:"TrackerType"`
+	CategoryDesc string    `json:"CategoryDesc"`
+	Title        string    `json:"Title"`
+	Guid         string    `json:"Guid"`
+	Link         string    `json:"Link"`
+	Details      string    `json:"Details"`
+	Peers        int       `json:"Peers"`
+	Seeders      int       `json:"Seeders"`
+	PublishDate  time.Time `json:"PublishDate"`
+	Size         int64     `json:"Size"`
+	Categories   []int     `json:"Category"`
+	MagnetUri    string    `json:"MagnetUri"`
+
+	IsDownloading bool `json:"-"`
+	IsDownloaded  bool `json:"-"`
 }
 
 // SearchResults is the structure for the API response
 type SearchResults struct {
-	Results []TorrentResult `json:"results"`
-	Total   int             `json:"total"`
-	Query   string          `json:"query"`
+	Results []Result `json:"results"`
+	Total   int      `json:"total"`
+	Query   string   `json:"query"`
 }
 
 type SearchRequest struct {
@@ -70,64 +83,57 @@ type SearchRequest struct {
 
 const apiURL = "http://localhost:7000/search"
 
-func fetchSearchResults(query string) ([]TorrentResult, error) {
+func fetchSearchResults(query string) (SearchResults, error) {
 	req := SearchRequest{Query: query}
 	client := &http.Client{
 		Timeout: 10 * time.Second,
 	}
 	body, err := json.Marshal(req)
 	if err != nil {
-		return nil, err
+		return SearchResults{}, err
 	}
 	buff := bytes.NewBuffer(body)
 	// Make the request
 	resp, err := client.Post(apiURL, "application/json", buff)
-	if err != nil {
-		return nil, fmt.Errorf("API request failed: %w", err)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		return SearchResults{}, fmt.Errorf("API request failed: %w", err)
 	}
 
 	defer func() {
 		_ = resp.Body.Close()
 	}()
 
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("API returned error status: %d - %s", resp.StatusCode, string(body))
-	}
-
-	// Parse JSON response
 	var searchResults SearchResults
-	if err = json.Unmarshal(body, &searchResults); err != nil {
-		return nil, fmt.Errorf("failed to parse JSON response: %w", err)
+
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return SearchResults{}, fmt.Errorf("failed to parse JSON response: %w", err)
 	}
 
-	return []TorrentResult{{
-		Name:          "test",
-		Size:          "q",
-		Seeders:       10,
-		Leechers:      10,
-		DateAdded:     "1",
-		MagnetLink:    "1",
-		IsDownloading: false,
-		IsDownloaded:  false,
-	}}, nil
+	if err = json.Unmarshal(b, &searchResults); err != nil {
+		return SearchResults{}, fmt.Errorf("failed to parse JSON response: %w", err)
+	}
+
+	var curatedList SearchResults
+	for _, res := range searchResults.Results {
+		if res.MagnetUri != "" {
+			curatedList.Results = append(curatedList.Results, res)
+		}
+	}
+
+	curatedList.Total = len(curatedList.Results)
+	return curatedList, nil
 }
 
 func main() {
-	// Initialize app
 	myApp := app.New()
 
-	// Set custom theme with larger font
 	myApp.Settings().SetTheme(&LargerTheme{Theme: theme.DefaultTheme()})
 
 	myWindow := myApp.NewWindow("Cactus app")
 	myWindow.Resize(fyne.NewSize(1000, 700)) // Larger default window size
 
-	// Storage for current results
-	var currentResults []TorrentResult
+	var searchResult SearchResults
 
 	// Create status bar at the bottom - now with larger text
 	statusLabel := widget.NewLabel("Ready")
@@ -148,7 +154,6 @@ func main() {
 		downloadButton := widget.NewButtonWithIcon("Download", theme.DownloadIcon(), nil)
 		downloadButton.Importance = widget.HighImportance // Make button more prominent
 
-		// Set minimum width for the button - make it approximately twice as wide
 		downloadButtonContainer := container.New(layout.NewGridWrapLayout(fyne.NewSize(160, 40)), downloadButton)
 
 		// Layout with button on right and more padding
@@ -170,7 +175,7 @@ func main() {
 	resultList := widget.NewList(
 		// Length function
 		func() int {
-			return len(currentResults)
+			return searchResult.Total
 		},
 		// Create template for each item
 		listItemTemplate,
@@ -181,12 +186,12 @@ func main() {
 	// Define update function separately to avoid self-reference
 	updateFunc := func(id widget.ListItemID, item fyne.CanvasObject) {
 		// Skip if index invalid
-		if id >= len(currentResults) {
+		if id >= len(searchResult.Results) {
 			return
 		}
 
 		// Get result and container
-		result := currentResults[id]
+		result := searchResult.Results[id]
 		itemContainer := item.(*fyne.Container)
 
 		// Get child widgets - need to navigate through the container hierarchy
@@ -200,9 +205,9 @@ func main() {
 		downloadButton := buttonContainer.Objects[0].(*widget.Button)
 
 		// Update content
-		nameLabel.SetText(result.Name)
-		detailsLabel.SetText(fmt.Sprintf("Size: %s | Seeds: %d | Peers: %d | Added: %s",
-			result.Size, result.Seeders, result.Leechers, result.DateAdded))
+		nameLabel.SetText(result.Title)
+		detailsLabel.SetText(fmt.Sprintf("Size: %d | Seeds: %d | Peers: %d | Link: %s",
+			result.Size, result.Seeders, result.Peers, result.MagnetUri))
 
 		// Update button state and text based on download status
 		if result.IsDownloaded {
@@ -222,11 +227,11 @@ func main() {
 		// Set button action
 		downloadButton.OnTapped = func() {
 			// Mark as downloading
-			currentResults[id].IsDownloading = true
+			searchResult.Results[id].IsDownloading = true
 			resultList.Refresh()
 
 			// Update status
-			statusLabel.SetText(fmt.Sprintf("Downloading: %s", result.Name))
+			statusLabel.SetText(fmt.Sprintf("Downloading: %s", result.Title))
 
 			// Simulate download process with goroutine
 			go func() {
@@ -234,19 +239,47 @@ func main() {
 				dialog.ShowInformation(
 					"Download Started",
 					fmt.Sprintf("Starting download for: %s\n\nMagnet link: %s",
-						result.Name, result.MagnetLink),
+						result.Title, result.MagnetUri),
 					myWindow,
 				)
 
-				// Simulate download completion after delay
-				time.Sleep(3 * time.Second)
+				td, err := downloader.NewTorrentDownloader("~/Downloads")
+				if err != nil {
+					log.Printf("cannot create directory %s \n", err)
+					return
+				}
+
+				title, err := td.DownloadFromMagnet(context.Background(), result.MagnetUri, func(info downloader.ProgressInfo) {
+					// Format download speed
+					var speedStr string
+					if info.DownloadSpeed < 1024 {
+						speedStr = fmt.Sprintf("%.2f B/s", info.DownloadSpeed)
+					} else if info.DownloadSpeed < 1024*1024 {
+						speedStr = fmt.Sprintf("%.2f KB/s", info.DownloadSpeed/1024)
+					} else {
+						speedStr = fmt.Sprintf("%.2f MB/s", info.DownloadSpeed/(1024*1024))
+					}
+
+					fmt.Printf("\rProgress: %.2f%% (%.2f MB/%.2f MB) - Peers: %d - Speed: %s",
+						info.PercentDone,
+						float64(info.BytesCompleted)/(1024*1024),
+						float64(info.TotalBytes)/(1024*1024),
+						info.PeersConnected,
+						speedStr,
+					)
+				})
+
+				if err != nil {
+					log.Printf("cannot complete download %s \n", err)
+					return
+				}
 
 				// Use the safe approach to update UI from a goroutine in Fyne
 				myApp.Driver().DoFromGoroutine(func() {
-					currentResults[id].IsDownloading = false
-					currentResults[id].IsDownloaded = true
+					searchResult.Results[id].IsDownloading = false
+					searchResult.Results[id].IsDownloaded = true
 					resultList.Refresh()
-					statusLabel.SetText("Download complete: " + result.Name)
+					statusLabel.SetText("Download complete: " + title)
 				}, false)
 			}()
 		}
@@ -279,7 +312,7 @@ func main() {
 		// Perform the API search in a goroutine
 		go func() {
 			// Call the API
-			results, err := fetchSearchResults(query)
+			result, err := fetchSearchResults(query)
 
 			// Update UI on the main thread
 			myApp.Driver().DoFromGoroutine(func() {
@@ -290,12 +323,12 @@ func main() {
 				}
 
 				// Update the results
-				currentResults = results
+				searchResult = result
 				resultList.Refresh()
 
 				// Update status based on results
-				if len(results) > 0 {
-					statusLabel.SetText(fmt.Sprintf("Found %d results for '%s'", len(results), query))
+				if result.Total > 0 {
+					statusLabel.SetText(fmt.Sprintf("Found %d results for '%s'", result.Total, query))
 				} else {
 					statusLabel.SetText(fmt.Sprintf("No results found for '%s'", query))
 				}

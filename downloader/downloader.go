@@ -1,9 +1,10 @@
-package main
+package downloader
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/anacrolix/log"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -31,7 +32,7 @@ type TorrentDownloader struct {
 // NewTorrentDownloader creates a new downloader instance
 func NewTorrentDownloader(downloadPath string) (*TorrentDownloader, error) {
 	// Create download directory if it doesn't exist
-	if err := os.MkdirAll(downloadPath, 0755); err != nil {
+	if err := os.MkdirAll(downloadPath, 0777); err != nil {
 		return nil, fmt.Errorf("failed to create download directory: %w", err)
 	}
 
@@ -68,12 +69,7 @@ func (td *TorrentDownloader) Close() error {
 }
 
 // DownloadFromMagnet downloads a file from a magnet link
-func (td *TorrentDownloader) DownloadFromMagnet(
-	ctx context.Context,
-	magnetLink string,
-	progressCallback func(ProgressInfo),
-) (string, error) {
-	// Add the torrent from the magnet link
+func (td *TorrentDownloader) DownloadFromMagnet(ctx context.Context, magnetLink string, progressCallback func(ProgressInfo)) (string, error) {
 	t, err := td.client.AddMagnet(magnetLink)
 	if err != nil {
 		return "", fmt.Errorf("failed to add magnet: %w", err)
@@ -89,7 +85,7 @@ func (td *TorrentDownloader) DownloadFromMagnet(
 		return "", errors.New("timeout waiting for torrent metadata")
 	}
 
-	// Start downloading
+	log.Printf("start downloading \n") // Start downloading
 	t.DownloadAll()
 
 	// Create a ticker for progress updates
@@ -128,14 +124,17 @@ func (td *TorrentDownloader) DownloadFromMagnet(
 
 			// Check if download is complete
 			if t.Complete().Bool() {
-				// Get the path to the downloaded file
+				log.Printf("download finished\n")
 				info := t.Info()
 				if len(info.Files) == 0 {
 					// Single file torrent
+
 					filePath := filepath.Join(td.downloadPath, info.Name)
+					log.Printf("download finished at %s\n", filePath)
 					return filePath, nil
 				}
-				// Return the path to the directory for multi-file torrents
+
+				log.Printf("download finished at (multitorrent) %s\n", filepath.Join(td.downloadPath, info.Name))
 				return filepath.Join(td.downloadPath, info.Name), nil
 			}
 
